@@ -23,11 +23,13 @@ interface JwtPayload { role: string; name?: string; }
 
 interface DashboardData {
   totalBookings: number;
+  confirmedBookings?: number;
+  cancelledBookings?: number;
   totalRevenue: number;
-  pendingRequestsCount: number;
+  pendingRequestsCount?: number;
   monthlyBookings?: number[];
-  hotel?: { name?: string };
   hotelName?: string;
+  hotel?: { name?: string };
 }
 
 interface BookingRequest {
@@ -43,7 +45,7 @@ interface BookingRequest {
     numberOfNights: number;
     user?: { name?: string };
   };
-  user?: { name?: string };
+  requestedBy?: { name?: string };
 }
 
 interface HotelBooking {
@@ -51,6 +53,9 @@ interface HotelBooking {
   checkInDate: string;
   numberOfNights: number;
   status: string;
+  totalPrice?: number;
+  paymentStatus?: string;
+  roomType?: string;
   user?: { name?: string; email?: string };
 }
 
@@ -132,28 +137,31 @@ export default function OwnerDashboard() {
         ]);
 
         if (dashRes.status === 403 || bkRes.status === 403) {
-          router.replace("/error/403"); return;
+          router.replace("/403"); return;
         }
         if (dashRes.status === 404) { setLoadError("Hotel not found."); setIsLoading(false); return; }
 
         const [dashData, reqData, bkData] = await Promise.all([
           dashRes.json(),
           reqRes.ok ? reqRes.json() : { data: [] },
-          bkRes.json(),
+          bkRes.ok ? bkRes.json() : { data: [] },
         ]);
+
+        if (!dashRes.ok) {
+          setLoadError(dashData.message || "Failed to load dashboard.");
+          setIsLoading(false);
+          return;
+        }
 
         const d: DashboardData = dashData.data || dashData;
         setDashboard(d);
-        setHotelName(d.hotel?.name || d.hotelName || "Hotel");
+        setHotelName(d.hotelName || d.hotel?.name || "Hotel");
 
-        // New endpoint already scopes requests to this hotel
         const allRequests: BookingRequest[] = reqData.data || reqData || [];
-        setRequests(allRequests.filter((r: BookingRequest) => r.status === "pending"));
-        setBookings((bkData.data || bkData || []).filter(
-          (b: HotelBooking) => b.status !== "cancelled"
-        ));
-      } catch {
-        setLoadError("Failed to load dashboard data.");
+        setRequests(allRequests.filter((r: BookingRequest) => r.status === "pending" && r.type === "delete"));
+        setBookings((bkData.data || bkData || []));
+      } catch (err) {
+        setLoadError(err instanceof Error ? err.message : "Failed to load dashboard data.");
       } finally {
         setIsLoading(false);
       }
@@ -175,7 +183,7 @@ export default function OwnerDashboard() {
           body: JSON.stringify({ action: "approve", reason: "Approved by hotel owner" }),
         }
       );
-      if (res.status === 403) { router.replace("/error/403"); return; }
+      if (res.status === 403) { router.replace("/403"); return; }
       if (!res.ok) throw new Error((await res.json()).message || "Failed");
       setRequests(r => r.filter(x => x._id !== confirmApprove._id));
       addToast("Request approved successfully.", "success");
@@ -199,7 +207,7 @@ export default function OwnerDashboard() {
           body: JSON.stringify({ action: "reject", reason: "Rejected by hotel owner" }),
         }
       );
-      if (res.status === 403) { router.replace("/error/403"); return; }
+      if (res.status === 403) { router.replace("/403"); return; }
       if (!res.ok) throw new Error((await res.json()).message || "Failed");
       setRequests(r => r.filter(x => x._id !== confirmReject._id));
       addToast("Request rejected. Booking unchanged.", "default");
@@ -269,7 +277,7 @@ export default function OwnerDashboard() {
           }),
         }
       );
-      if (res.status === 403) { router.replace("/error/403"); return; }
+      if (res.status === 403) { router.replace("/403"); return; }
       if (res.status === 409) { setEditConflict(true); return; }
       if (!res.ok) throw new Error((await res.json()).message || "Failed");
       setBookings(b => b.map(x =>
@@ -292,7 +300,7 @@ export default function OwnerDashboard() {
   );
 
   const guestName = (req: BookingRequest) =>
-    req.booking?.user?.name || req.user?.name || "Guest";
+    req.booking?.user?.name || req.requestedBy?.name || "Guest";
 
   /* ─── Render ─── */
   return (
@@ -302,7 +310,7 @@ export default function OwnerDashboard() {
         {/* Page header */}
         <div className="mb-8">
           <button
-            onClick={() => router.push("/owner")}
+            onClick={() => router.push("/owner/hotels")}
             className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-blue-600 mb-3 bg-transparent border-none cursor-pointer"
           >
             <ArrowLeft className="size-4" /> Back
@@ -450,39 +458,52 @@ export default function OwnerDashboard() {
                               ? "bg-green-100 text-green-700 border-0"
                               : b.status === "pending"
                               ? "bg-yellow-100 text-yellow-700 border-0"
+                              : b.status === "cancelled"
+                              ? "bg-red-100 text-red-700 border-0"
                               : "bg-gray-100 text-gray-600 border-0"
                           }>
                             {b.status}
                           </Badge>
+                          {b.paymentStatus && b.paymentStatus !== "paid" && (
+                            <Badge className="bg-orange-100 text-orange-700 border-0 text-xs">
+                              {b.paymentStatus.replace(/_/g, " ")}
+                            </Badge>
+                          )}
                         </div>
                         <div className="text-sm text-gray-500">
                           Check-in: {fmtDate(b.checkInDate)} · {b.numberOfNights} nights
+                          {b.roomType && <span className="ml-2 capitalize text-gray-400">· {b.roomType}</span>}
+                          {b.totalPrice != null && <span className="ml-2 font-medium text-gray-700">· {fmtMoney(b.totalPrice)}</span>}
                         </div>
                       </div>
                       <div className="flex gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            setEditForm({ checkInDate: b.checkInDate.slice(0, 10), numberOfNights: String(b.numberOfNights) });
-                            setEditConflict(false);
-                            setEditDialog(b);
-                          }}
-                        >
-                          Edit Booking
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="text-red-600 border-red-200 hover:bg-red-50"
-                          onClick={() => {
-                            setCancelReason("");
-                            setCancelReasonErr("");
-                            setCancelDialog(b);
-                          }}
-                        >
-                          Cancel Booking
-                        </Button>
+                        {b.status !== "cancelled" && (
+                          <>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                setEditForm({ checkInDate: b.checkInDate.slice(0, 10), numberOfNights: String(b.numberOfNights) });
+                                setEditConflict(false);
+                                setEditDialog(b);
+                              }}
+                            >
+                              Edit Booking
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="text-red-600 border-red-200 hover:bg-red-50"
+                              onClick={() => {
+                                setCancelReason("");
+                                setCancelReasonErr("");
+                                setCancelDialog(b);
+                              }}
+                            >
+                              Cancel Booking
+                            </Button>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -640,11 +661,11 @@ export default function OwnerDashboard() {
               <input
                 type="number"
                 min="1"
-                max="30"
+                max="3"
                 className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                 value={editForm.numberOfNights}
                 onChange={e => { setEditForm(f => ({ ...f, numberOfNights: e.target.value })); setEditConflict(false); }}
-                placeholder="e.g. 3"
+                placeholder="1 – 3"
               />
             </div>
           </div>
